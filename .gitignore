@@ -1,0 +1,13 @@
+# Python venv
+venv/
+
+# Local Google credentials and tokens
+google-connector/credentials.json
+google-connector/token.json
+
+# Local data dumps
+google-connector/*.json
+
+# Bytecode / cache
+__pycache__/
+*.pyc
