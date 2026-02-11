@@ -14,6 +14,7 @@ Auth flow:
 import os
 from pathlib import Path
 from typing import List, Optional
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -30,14 +31,18 @@ APP_DIR = Path(__file__).parent
 CREDENTIALS_FILE = APP_DIR / "credentials.json"  # downloaded from Google Cloud Console
 TOKEN_FILE = APP_DIR / "token.json"             # stored after first auth flow
 
-# Scopes: read-only for Calendar, Gmail, Drive
+# Scopes: read/write for Calendar, Gmail (modify), and Drive (file-level)
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
-app = FastAPI(title="Google Connector", version="0.2.0")
+# Calendar IDs
+PRIMARY_CAL_ID = "primary"
+FAMILY_CAL_ID = "family18346276431992889799@group.calendar.google.com"
+
+app = FastAPI(title="Google Connector", version="0.3.0")
 
 
 class CalendarEvent(BaseModel):
@@ -109,38 +114,49 @@ async def health():
 
 @app.get("/calendar/next", response_model=List[CalendarEvent])
 async def calendar_next(max_results: int = 10):
-    """Return the next upcoming events from the primary calendar."""
+    """Return the next upcoming events from primary + Family calendars."""
     try:
         creds = get_credentials()
         service = build("calendar", "v3", credentials=creds)
 
-        events_result = (
-            service.events()
-            .list(
-                calendarId="primary",
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
-                timeMin=None,
-            )
-            .execute()
-        )
-        items = events_result.get("items", [])
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         events: List[CalendarEvent] = []
-        for item in items:
-            start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
-            end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
-            events.append(
-                CalendarEvent(
-                    start=start,
-                    end=end,
-                    summary=item.get("summary"),
-                    description=item.get("description"),
-                    location=item.get("location"),
-                )
-            )
 
+        for cal_id in (PRIMARY_CAL_ID, FAMILY_CAL_ID):
+            events_result = (
+                service.events()
+                .list(
+                    calendarId=cal_id,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy="startTime",
+                    timeMin=now_iso,
+                )
+                .execute()
+            )
+            items = events_result.get("items", [])
+
+            for item in items:
+                start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+                end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+                events.append(
+                    CalendarEvent(
+                        start=start,
+                        end=end,
+                        summary=item.get("summary"),
+                        description=item.get("description"),
+                        location=item.get("location"),
+                    )
+                )
+
+        # Sort combined events by start time
+        def parse_dt(s: Optional[str]):
+            if not s:
+                return ""  # push all-day/unknown to the top
+            return s
+
+        events.sort(key=lambda e: parse_dt(e.start))
         return events
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
